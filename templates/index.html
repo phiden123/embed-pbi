@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Power BI Embed Test</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="preconnect" href="https://app.powerbi.com" crossorigin>
+  <script defer src="https://cdn.jsdelivr.net/npm/powerbi-client/dist/powerbi.min.js"></script>
+  <style>
+    /* Keep the landing view simple while the report is not embedded. */
+    .home-container {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 95vh;
+      font-family: Arial, sans-serif;
+      text-align: center;
+    }
+    .btn-view {
+      padding: 12px 24px;
+      font-size: 16px;
+      background-color: #0078d4;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+      margin-top: 15px;
+    }
+    .btn-view:hover {
+      background-color: #005a9e;
+    }
+    .d-none {
+      display: none !important;
+    }
+    .input-username {
+      padding: 10px;
+      width: 280px;
+      font-size: 14px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      margin-top: 15px;
+    }
+    .portal-login {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      height: 95vh;
+      justify-content: center;
+      font-family: Arial, sans-serif;
+    }
+    .portal-login input {
+      padding: 10px;
+      width: 280px;
+      font-size: 14px;
+    }
+    .error-message {
+      color: #b91c1c;
+      min-height: 20px;
+    }
+  </style>
+</head>
+<body data-embed-url="{{ embed_url }}" data-report-id="{{ report_id }}" data-authenticated="{{ 'true' if portal_authenticated else 'false' }}">
+
+  <div id="loginPage" class="portal-login {% if portal_authenticated %}d-none{% endif %}">
+    <h1>Portal login</h1>
+    <input type="password" id="portalPassword" placeholder="Nhập password portal" autocomplete="current-password">
+    <button class="btn-view" id="loginButton">Đăng nhập</button>
+    <p id="loginError" class="error-message"></p>
+  </div>
+
+  <!-- Landing view: choose the RLS username before requesting a token. -->
+  <div id="homePage" class="home-container {% if not portal_authenticated %}d-none{% endif %}">
+    <h1>Hello Chào bạn 👋</h1>
+    <p>Hệ thống thử nghiệm hiệu năng Fabric Embed Report</p>
+    <input type="text" id="usernameInput" class="input-username" value="phipc2@msb.com.vn" placeholder="Nhập username để test RLS">
+    <button class="btn-view" id="viewReportButton">Xem báo cáo</button>
+  </div>
+
+  <!-- The report container stays hidden until the embed token is ready. -->
+  <div id="reportPage" class="d-none">
+    <div
+      id="reportContainer"
+      style="
+        height:95vh;
+        width:100%;
+        border:1px solid #ccc;
+      ">
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // The SDK is deferred, so initialize only after it has loaded.
+      const models = window['powerbi-client'].models;
+
+      const config = {
+        type: 'report',
+        tokenType: models.TokenType.Embed,
+        accessToken: '',
+        embedUrl: document.body.dataset.embedUrl,
+        id: document.body.dataset.reportId,
+        permissions: models.Permissions.Read,
+        settings: {
+          panes: {
+            filters: {
+              visible: false
+            }
+          },
+          navContentPaneEnabled: false
+        }
+      };
+
+      const reportContainer = document.getElementById('reportContainer');
+      let report = null;
+
+      function bootstrapReport() {
+        // Bootstrap starts the report iframe before the embed token arrives.
+        powerbi.bootstrap(reportContainer, { type: 'report' });
+      }
+
+      async function startEmbedding() {
+        const inputUser = document.getElementById('usernameInput').value.trim();
+        if (!inputUser) {
+          alert('Vui lòng nhập username.');
+          return;
+        }
+
+        const viewButton = document.getElementById('viewReportButton');
+        viewButton.disabled = true;
+
+        try {
+          const startedAt = performance.now();
+          const response = await fetch('/get-embed-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: inputUser })
+          });
+          const data = await response.json();
+          if (!response.ok || !data.token) {
+            throw new Error(data.error || 'Server không trả về Embed Token.');
+          }
+
+          config.accessToken = data.token;
+
+          document.getElementById('homePage').classList.add('d-none');
+          document.getElementById('reportPage').classList.remove('d-none');
+
+          // Apply the fresh token to the already bootstrapped report iframe.
+          report = powerbi.embed(reportContainer, config);
+          console.info(`Embed token ready in ${(performance.now() - startedAt).toFixed(0)}ms`);
+
+          report.on("loaded", function () {
+            console.log("Report loaded successfully");
+          });
+
+          report.on("error", function (event) {
+            console.error(event.detail);
+          });
+
+        } catch (error) {
+          console.error("Lỗi khi lấy Embed Token:", error);
+          alert(`Không thể lấy Embed Token từ Server: ${error.message}`);
+          viewButton.disabled = false;
+        }
+      }
+
+      document.getElementById('viewReportButton').addEventListener('click', startEmbedding);
+
+      async function loginToPortal() {
+        const passwordInput = document.getElementById('portalPassword');
+        const loginButton = document.getElementById('loginButton');
+        const loginError = document.getElementById('loginError');
+        loginButton.disabled = true;
+        loginError.textContent = '';
+        try {
+          const response = await fetch('/portal-login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: passwordInput.value })
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error || 'Đăng nhập thất bại.');
+          }
+          document.getElementById('loginPage').classList.add('d-none');
+          document.getElementById('homePage').classList.remove('d-none');
+          bootstrapReport();
+          passwordInput.value = '';
+        } catch (error) {
+          loginError.textContent = error.message;
+          loginButton.disabled = false;
+        }
+      }
+
+      document.getElementById('loginButton').addEventListener('click', loginToPortal);
+      document.getElementById('portalPassword').addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          loginToPortal();
+        }
+      });
+
+      if (document.body.dataset.authenticated === 'true') {
+        bootstrapReport();
+      }
+    });
+  </script>
+
+</body>
+</html>
