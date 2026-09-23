@@ -109,12 +109,46 @@
               visible: false
             }
           },
-          navContentPaneEnabled: false
+          navContentPaneEnabled: false,
+          visualRenderedEvents: true
         }
       };
 
       const reportContainer = document.getElementById('reportContainer');
       let report = null;
+      let visualLoadRecorded = false;
+      let pageInitializationMs = null;
+
+      function sendPerformanceMetric(name, durationMs) {
+        if (!Number.isFinite(durationMs) || durationMs < 0) {
+          return;
+        }
+
+        const metric = {
+          name,
+          duration_ms: Number(durationMs.toFixed(2))
+        };
+        console.info(`[performance] ${name}: ${metric.duration_ms}ms`);
+
+        fetch('/performance-metrics', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(metric),
+          keepalive: true
+        }).catch(error => console.warn('Không thể gửi performance metric:', error));
+      }
+
+      function measurePageInitialization() {
+        const navigation = performance.getEntriesByType('navigation')[0];
+        if (!navigation) {
+          return;
+        }
+
+        pageInitializationMs = navigation.domContentLoadedEventEnd - navigation.startTime;
+        if (document.body.dataset.authenticated === 'true') {
+          sendPerformanceMetric('page_init', pageInitializationMs);
+        }
+      }
 
       function bootstrapReport() {
         // Bootstrap starts the report iframe before the embed token arrives.
@@ -130,9 +164,9 @@
 
         const viewButton = document.getElementById('viewReportButton');
         viewButton.disabled = true;
+        const tokenRequestStartedAt = performance.now();
 
         try {
-          const startedAt = performance.now();
           const response = await fetch('/get-embed-token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -150,10 +184,22 @@
 
           // Apply the fresh token to the already bootstrapped report iframe.
           report = powerbi.embed(reportContainer, config);
-          console.info(`Embed token ready in ${(performance.now() - startedAt).toFixed(0)}ms`);
+          const reportStartedAt = performance.now();
 
           report.on("loaded", function () {
-            console.log("Report loaded successfully");
+            sendPerformanceMetric('report_loaded', performance.now() - reportStartedAt);
+            console.info('Report loaded successfully');
+          });
+
+          report.on("rendered", function () {
+            sendPerformanceMetric('report_rendered', performance.now() - reportStartedAt);
+          });
+
+          report.on("visualRendered", function () {
+            if (!visualLoadRecorded) {
+              visualLoadRecorded = true;
+              sendPerformanceMetric('visual_loaded', performance.now() - reportStartedAt);
+            }
           });
 
           report.on("error", function (event) {
@@ -164,6 +210,8 @@
           console.error("Lỗi khi lấy Embed Token:", error);
           alert(`Không thể lấy Embed Token từ Server: ${error.message}`);
           viewButton.disabled = false;
+        } finally {
+          sendPerformanceMetric('token_api', performance.now() - tokenRequestStartedAt);
         }
       }
 
@@ -188,6 +236,9 @@
           document.getElementById('loginPage').classList.add('d-none');
           document.getElementById('homePage').classList.remove('d-none');
           bootstrapReport();
+          if (pageInitializationMs !== null) {
+            sendPerformanceMetric('page_init', pageInitializationMs);
+          }
           passwordInput.value = '';
         } catch (error) {
           loginError.textContent = error.message;
@@ -205,6 +256,8 @@
       if (document.body.dataset.authenticated === 'true') {
         bootstrapReport();
       }
+
+      measurePageInitialization();
     });
   </script>
 

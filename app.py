@@ -2,6 +2,8 @@ import os
 import threading
 import time
 import hmac
+import json
+import logging
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session
 import requests
@@ -20,6 +22,39 @@ app.config.update(
 
 performance_metrics = {}
 performance_metrics_lock = threading.Lock()
+
+
+class AzureMonitorJsonFormatter(logging.Formatter):
+    """Emit one structured performance event per log line for App Service."""
+    def format(self, record):
+        payload = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "message": record.getMessage(),
+        }
+        for field in (
+            "event_type",
+            "metric_name",
+            "duration_ms",
+            "recorded_at",
+        ):
+            value = getattr(record, field, None)
+            if value is not None:
+                payload[field] = value
+        return json.dumps(payload, separators=(",", ":"))
+
+
+def configure_logging():
+    """Write structured logs to stdout, which App Service ships to Azure Monitor."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(AzureMonitorJsonFormatter())
+    app.logger.handlers.clear()
+    app.logger.addHandler(handler)
+    app.logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+    app.logger.propagate = False
+
+
+configure_logging()
 
 
 def allowed_users():
@@ -42,14 +77,22 @@ def portal_login_required(view):
 
 
 def record_performance_metric(name, duration_ms):
-    """Lưu timing gần nhất cho từng mốc và ghi ra log server."""
+    """Keep a local latest value and emit a durable Azure Monitor event."""
     metric = {
         "duration_ms": round(float(duration_ms), 2),
         "recorded_at": time.time()
     }
     with performance_metrics_lock:
         performance_metrics[name] = metric
-    app.logger.info("performance.%s duration_ms=%.2f", name, metric["duration_ms"])
+    app.logger.info(
+        "performance_metric",
+        extra={
+            "event_type": "performance_metric",
+            "metric_name": name,
+            "duration_ms": metric["duration_ms"],
+            "recorded_at": metric["recorded_at"],
+        },
+    )
 
 def get_access_token():
     """Request a short-lived Power BI API token for the service principal."""
@@ -61,13 +104,15 @@ def get_access_token():
         "scope": "https://analysis.windows.net/powerbi/api/.default",
         "grant_type": "client_credentials"
     }
-    response = requests.post(url, data=payload, timeout=15)
-    response.raise_for_status()
-    token_result = response.json()
-    record_performance_metric(
-        "access_token",
-        (time.perf_counter() - started_at) * 1000
-    )
+    try:
+        response = requests.post(url, data=payload, timeout=15)
+        response.raise_for_status()
+        token_result = response.json()
+    finally:
+        record_performance_metric(
+            "access_token",
+            (time.perf_counter() - started_at) * 1000
+        )
     access_token = token_result.get("access_token")
     if not access_token:
         raise RuntimeError("Microsoft identity platform did not return an access token")
@@ -101,23 +146,21 @@ def generate_embed_token(username):
             }
         ]
     }
-    response = requests.post(url, headers=headers, json=body, timeout=15)
-    response.raise_for_status()
-    token_result = response.json()
-    
-    # Keep a clear application error when Power BI returns no embed token.
-    if "token" not in token_result:
-        app.logger.error("Power BI API did not return an embed token: %s", token_result)
+    try:
+        response = requests.post(url, headers=headers, json=body, timeout=15)
+        response.raise_for_status()
+        token_result = response.json()
+
+        # Keep a clear application error when Power BI returns no embed token.
+        if "token" not in token_result:
+            app.logger.error("Power BI API did not return an embed token: %s", token_result)
+            return None
+        return token_result["token"]
+    finally:
         record_performance_metric(
             "embed_token",
             (time.perf_counter() - started_at) * 1000
         )
-        return None
-    record_performance_metric(
-        "embed_token",
-        (time.perf_counter() - started_at) * 1000
-    )
-    return token_result["token"]
 
 @app.route('/')
 def index():
@@ -180,7 +223,13 @@ def record_frontend_performance():
     name = data.get('name')
     duration_ms = data.get('duration_ms')
 
-    if name not in {'report_loaded', 'report_rendered'}:
+    if name not in {
+        'page_init',
+        'token_api',
+        'report_loaded',
+        'report_rendered',
+        'visual_loaded',
+    }:
         return jsonify({"error": "Unsupported performance metric"}), 400
     try:
         duration_ms = float(duration_ms)
