@@ -8,6 +8,10 @@ from functools import wraps
 from flask import Flask, render_template, request, jsonify, session
 import requests
 from dotenv import load_dotenv
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from azure.monitor.opentelemetry.exporter import AzureMonitorMetricExporter
 
 # Load local configuration without exposing secrets to the browser.
 load_dotenv()
@@ -57,6 +61,31 @@ def configure_logging():
 configure_logging()
 
 
+def configure_metrics():
+    """Export duration measurements as Azure Application Insights metrics."""
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if not connection_string:
+        app.logger.warning("APPLICATIONINSIGHTS_CONNECTION_STRING is not configured")
+        return None
+
+    exporter = AzureMonitorMetricExporter(connection_string=connection_string)
+    reader = PeriodicExportingMetricReader(exporter, export_interval_millis=5000)
+    metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+    return metrics.get_meter("embed-pbi.performance")
+
+
+performance_meter = configure_metrics()
+performance_duration = (
+    performance_meter.create_histogram(
+        name="performance.duration",
+        unit="ms",
+        description="Duration of application and Power BI embed performance events",
+    )
+    if performance_meter
+    else None
+)
+
+
 def allowed_users():
     """Return the configured RLS usernames in a normalized form."""
     return {
@@ -93,6 +122,11 @@ def record_performance_metric(name, duration_ms):
             "recorded_at": metric["recorded_at"],
         },
     )
+    if performance_duration:
+        performance_duration.record(
+            metric["duration_ms"],
+            attributes={"metric_name": name},
+        )
 
 def get_access_token():
     """Request a short-lived Power BI API token for the service principal."""
