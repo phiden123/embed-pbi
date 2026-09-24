@@ -16,6 +16,9 @@ are not shared between scaled-out instances.
 	and enable it.
 3. In **Configuration**, add `APPLICATIONINSIGHTS_CONNECTION_STRING` using the
 	connection string from Application Insights, then restart the App Service.
+	The frontend uses this value for browser page views, sessions, and users. If
+	the browser should use a different Application Insights resource, set
+	`APPLICATIONINSIGHTS_BROWSER_CONNECTION_STRING` instead.
 4. Keep application logs enabled if you also need App Service **Log stream**.
 	Application Insights is the durable store for querying and alerting.
 

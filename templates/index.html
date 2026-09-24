@@ -5,6 +5,7 @@
   <title>Power BI Embed Test</title>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <link rel="preconnect" href="https://app.powerbi.com" crossorigin>
+  <script src="https://js.monitor.azure.com/scripts/b/ai.3.gbl.min.js" crossorigin="anonymous"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/powerbi-client/dist/powerbi.min.js"></script>
   <style>
     /* Keep the landing view simple while the report is not embedded. */
@@ -62,7 +63,7 @@
     }
   </style>
 </head>
-<body data-embed-url="{{ embed_url }}" data-report-id="{{ report_id }}" data-authenticated="{{ 'true' if portal_authenticated else 'false' }}">
+<body data-embed-url="{{ embed_url }}" data-report-id="{{ report_id }}" data-authenticated="{{ 'true' if portal_authenticated else 'false' }}" data-applicationinsights-connection-string="{{ applicationinsights_connection_string }}">
 
   <div id="loginPage" class="portal-login {% if portal_authenticated %}d-none{% endif %}">
     <h1>Portal login</h1>
@@ -93,6 +94,27 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', () => {
+      const applicationInsightsConnectionString = document.body.dataset.applicationinsightsConnectionString;
+      const appInsights = applicationInsightsConnectionString && window.Microsoft && window.Microsoft.ApplicationInsights
+        ? new Microsoft.ApplicationInsights.ApplicationInsights({
+            config: {
+              connectionString: applicationInsightsConnectionString,
+              enableAutoRouteTracking: true
+            }
+          })
+        : null;
+
+      if (appInsights) {
+        appInsights.loadAppInsights();
+        appInsights.trackPageView();
+      }
+
+      function trackPortalEvent(name, properties = {}) {
+        if (appInsights) {
+          appInsights.trackEvent({ name }, properties);
+        }
+      }
+
       // The SDK is deferred, so initialize only after it has loaded.
       const models = window['powerbi-client'].models;
 
@@ -179,6 +201,11 @@
 
           config.accessToken = data.token;
 
+          if (appInsights) {
+            appInsights.setAuthenticatedUserContext(inputUser);
+          }
+          trackPortalEvent('embed_token_requested', { username: inputUser });
+
           document.getElementById('homePage').classList.add('d-none');
           document.getElementById('reportPage').classList.remove('d-none');
 
@@ -236,6 +263,7 @@
           document.getElementById('loginPage').classList.add('d-none');
           document.getElementById('homePage').classList.remove('d-none');
           bootstrapReport();
+          trackPortalEvent('portal_login_succeeded');
           if (pageInitializationMs !== null) {
             sendPerformanceMetric('page_init', pageInitializationMs);
           }

@@ -4,8 +4,10 @@ import time
 import hmac
 import json
 import logging
+import sys
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, session
+from flask.logging import default_handler
 import requests
 from dotenv import load_dotenv
 from opentelemetry import metrics
@@ -41,6 +43,7 @@ class AzureMonitorJsonFormatter(logging.Formatter):
             "metric_name",
             "duration_ms",
             "recorded_at",
+            "username",
         ):
             value = getattr(record, field, None)
             if value is not None:
@@ -50,12 +53,13 @@ class AzureMonitorJsonFormatter(logging.Formatter):
 
 def configure_logging():
     """Write structured logs to stdout, which App Service ships to Azure Monitor."""
-    handler = logging.StreamHandler()
-    handler.setFormatter(AzureMonitorJsonFormatter())
-    app.logger.handlers.clear()
-    app.logger.addHandler(handler)
+    app.logger.removeHandler(default_handler)
+    if not any(getattr(handler, "name", None) == "azure_app_service" for handler in app.logger.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.name = "azure_app_service"
+        handler.setFormatter(AzureMonitorJsonFormatter())
+        app.logger.addHandler(handler)
     app.logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
-    app.logger.propagate = False
 
 
 configure_logging()
@@ -207,6 +211,10 @@ def index():
     return render_template('index.html', 
                            embed_url=embed_url, 
                            report_id=report_id,
+                           applicationinsights_connection_string=os.getenv(
+                               'APPLICATIONINSIGHTS_BROWSER_CONNECTION_STRING',
+                               os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING', '')
+                           ),
                            portal_authenticated=session.get('portal_authenticated', False))
 
 
@@ -223,6 +231,10 @@ def portal_login():
 
     session.clear()
     session['portal_authenticated'] = True
+    app.logger.info(
+        "portal_login_succeeded",
+        extra={"event_type": "portal_login_succeeded"},
+    )
     return jsonify({'ok': True})
 
 @app.route('/get-embed-token', methods=['POST'])
@@ -235,6 +247,11 @@ def get_embed_token_api():
         return jsonify({"error": "username is required"}), 400
     if username.casefold() not in allowed_users():
         return jsonify({"error": "username is not allowed"}), 403
+
+    app.logger.info(
+        "embed_token_requested",
+        extra={"event_type": "embed_token_requested", "username": username},
+    )
 
     try:
         embed_token = generate_embed_token(username)
