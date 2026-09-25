@@ -10,10 +10,16 @@ from flask import Flask, render_template, request, jsonify, session
 from flask.logging import default_handler
 import requests
 from dotenv import load_dotenv
+from opentelemetry._logs import set_logger_provider
 from opentelemetry import metrics
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-from azure.monitor.opentelemetry.exporter import AzureMonitorMetricExporter
+from azure.monitor.opentelemetry.exporter import (
+    AzureMonitorLogExporter,
+    AzureMonitorMetricExporter,
+)
 
 # Load local configuration without exposing secrets to the browser.
 load_dotenv()
@@ -53,13 +59,30 @@ class AzureMonitorJsonFormatter(logging.Formatter):
 
 
 def configure_logging():
-    """Write structured logs to stdout, which App Service ships to Azure Monitor."""
+    """Write structured logs to stdout and directly to Application Insights."""
     app.logger.removeHandler(default_handler)
     if not any(getattr(handler, "name", None) == "azure_app_service" for handler in app.logger.handlers):
         handler = logging.StreamHandler(sys.stdout)
         handler.name = "azure_app_service"
         handler.setFormatter(AzureMonitorJsonFormatter())
         app.logger.addHandler(handler)
+
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if connection_string and not any(
+        getattr(handler, "name", None) == "azure_monitor_logs"
+        for handler in app.logger.handlers
+    ):
+        logger_provider = LoggerProvider()
+        logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(
+                AzureMonitorLogExporter(connection_string=connection_string)
+            )
+        )
+        set_logger_provider(logger_provider)
+        handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+        handler.name = "azure_monitor_logs"
+        app.logger.addHandler(handler)
+
     app.logger.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 
 
