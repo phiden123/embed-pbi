@@ -99,6 +99,7 @@
         ? new Microsoft.ApplicationInsights.ApplicationInsights({
             config: {
               connectionString: applicationInsightsConnectionString,
+              samplingPercentage: 100,
               enableAutoRouteTracking: true
             }
           })
@@ -140,6 +141,9 @@
       let report = null;
       let visualLoadRecorded = false;
       let pageInitializationMs = null;
+      const browserSessionId = crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
       function sendPerformanceMetric(name, durationMs) {
         if (!Number.isFinite(durationMs) || durationMs < 0) {
@@ -148,17 +152,31 @@
 
         const metric = {
           name,
-          duration_ms: Number(durationMs.toFixed(2))
+          duration_ms: Number(durationMs.toFixed(2)),
+          session_id: browserSessionId,
+          username: document.getElementById('usernameInput').value.trim()
         };
         console.info(`[performance] ${name}: ${metric.duration_ms}ms`);
+
+        const payload = JSON.stringify(metric);
+        const beaconBody = new Blob([payload], { type: 'application/json' });
+        if (navigator.sendBeacon && navigator.sendBeacon('/performance-metrics', beaconBody)) {
+          return;
+        }
 
         fetch('/performance-metrics', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(metric),
+          body: payload,
           keepalive: true
         }).catch(error => console.warn('Không thể gửi performance metric:', error));
       }
+
+      window.addEventListener('pagehide', () => {
+        if (appInsights) {
+          appInsights.flush();
+        }
+      });
 
       function measurePageInitialization() {
         const navigation = performance.getEntriesByType('navigation')[0];

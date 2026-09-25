@@ -44,6 +44,7 @@ class AzureMonitorJsonFormatter(logging.Formatter):
             "duration_ms",
             "recorded_at",
             "username",
+            "session_id",
         ):
             value = getattr(record, field, None)
             if value is not None:
@@ -109,7 +110,7 @@ def portal_login_required(view):
     return wrapped_view
 
 
-def record_performance_metric(name, duration_ms):
+def record_performance_metric(name, duration_ms, context=None):
     """Keep a local latest value and emit a durable Azure Monitor event."""
     metric = {
         "duration_ms": round(float(duration_ms), 2),
@@ -124,6 +125,7 @@ def record_performance_metric(name, duration_ms):
             "metric_name": name,
             "duration_ms": metric["duration_ms"],
             "recorded_at": metric["recorded_at"],
+            **(context or {}),
         },
     )
     if performance_duration:
@@ -289,7 +291,12 @@ def record_frontend_performance():
     if duration_ms < 0:
         return jsonify({"error": "duration_ms must be non-negative"}), 400
 
-    record_performance_metric(name, duration_ms)
+    context = {
+        key: str(data[key]).strip()
+        for key in ("session_id", "username")
+        if data.get(key)
+    }
+    record_performance_metric(name, duration_ms, context=context)
     return jsonify({"ok": True})
 
 
